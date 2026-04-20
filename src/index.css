@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+* {
+  font-family: 'Space Mono', monospace;
+  box-sizing: border-box;
+}
+
+body {
+  background-color: #f5f0e8;
+}
+
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: #f5f0e8; border-left: 2px solid #000; }
+::-webkit-scrollbar-thumb { background: #000; }

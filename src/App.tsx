@@ -1,0 +1,402 @@
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { Task, Project, today } from './types'
+import { Positions, autoArrange } from './utils'
+import { api, checkAuth, setToken, AuthUser, ExportProject } from './api'
+import TaskGraph from './components/TaskGraph'
+import TaskModal from './components/TaskModal'
+import StatsBar from './components/StatsBar'
+import Sidebar from './components/Sidebar'
+import LoginScreen from './components/LoginScreen'
+
+function genId(): string { return Date.now().toString(36) + Math.random().toString(36).slice(2) }
+function clone<T>(v: T): T { return JSON.parse(JSON.stringify(v)) }
+
+interface BoardState { tasks: Task[]; positions: Positions }
+
+export default function App() {
+  const [user, setUser] = useState<AuthUser | null>(null)
+  const [authChecking, setAuthChecking] = useState(true)
+  const [needsSetup, setNeedsSetup] = useState(false)
+
+  const [projects, setProjects] = useState<Project[]>([])
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const [tasks, setTasks] = useState<Task[]>([])
+  const [positions, setPositions] = useState<Positions>({})
+  const [loadingProjects, setLoadingProjects] = useState(true)
+  const [loadingBoard, setLoadingBoard] = useState(false)
+  const [showModal, setShowModal] = useState(false)
+  const [editingTask, setEditingTask] = useState<Task | null>(null)
+
+  // ── History (refs — no re-renders) ────────────────────
+  const historyRef = useRef<BoardState[]>([])
+  const historyIdxRef = useRef(-1)
+  const activeIdRef = useRef<string | null>(null)
+  useEffect(() => { activeIdRef.current = activeId }, [activeId])
+
+  function pushHistory(t: Task[], p: Positions) {
+    historyRef.current = historyRef.current.slice(0, historyIdxRef.current + 1)
+    historyRef.current.push(clone({ tasks: t, positions: p }))
+    historyIdxRef.current = historyRef.current.length - 1
+  }
+
+  const handleUndo = useCallback(() => {
+    if (historyIdxRef.current <= 0) return
+    historyIdxRef.current--
+    const s = clone(historyRef.current[historyIdxRef.current])
+    setTasks(s.tasks); setPositions(s.positions)
+    const pid = activeIdRef.current
+    if (pid) api.replaceBoardState(pid, s.tasks, s.positions)
+  }, [])
+
+  const handleRedo = useCallback(() => {
+    if (historyIdxRef.current >= historyRef.current.length - 1) return
+    historyIdxRef.current++
+    const s = clone(historyRef.current[historyIdxRef.current])
+    setTasks(s.tasks); setPositions(s.positions)
+    const pid = activeIdRef.current
+    if (pid) api.replaceBoardState(pid, s.tasks, s.positions)
+  }, [])
+
+  // Global Ctrl+Z / Ctrl+Y
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const el = document.activeElement
+      if (el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA') return
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') { e.preventDefault(); handleUndo() }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) { e.preventDefault(); handleRedo() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [handleUndo, handleRedo])
+
+  // ── Auth check on mount ────────────────────────────────
+  useEffect(() => {
+    checkAuth().then(({ user, needsSetup }) => {
+      setUser(user)
+      setNeedsSetup(needsSetup)
+      setAuthChecking(false)
+    })
+  }, [])
+
+  async function handleLogout() {
+    await api.logout().catch(() => {})
+    setToken(null)
+    setUser(null)
+    setProjects([])
+    setActiveId(null)
+    setTasks([])
+    setPositions({})
+  }
+
+  // ── Load projects ──────────────────────────────────────
+  useEffect(() => {
+    if (!user) return
+    setLoadingProjects(true)
+    api.getProjects()
+      .then(ps => { setProjects(ps); if (ps.length > 0) setActiveId(ps[0].id) })
+      .finally(() => setLoadingProjects(false))
+  }, [user])
+
+  // ── Load board when project switches ──────────────────
+  useEffect(() => {
+    if (!activeId) { setTasks([]); setPositions({}); return }
+    setLoadingBoard(true)
+    Promise.all([api.getProjectTasks(activeId), api.getProjectPositions(activeId)])
+      .then(([t, p]) => {
+        setTasks(t); setPositions(p)
+        historyRef.current = [clone({ tasks: t, positions: p })]
+        historyIdxRef.current = 0
+      })
+      .finally(() => setLoadingBoard(false))
+  }, [activeId])
+
+  // ── Project handlers ───────────────────────────────────
+  function handleCreateProject(name: string, color: string) {
+    const id = genId()
+    const p: Omit<Project, 'taskCount'> = { id, name, color, createdAt: new Date().toISOString() }
+    setProjects(prev => [...prev, { ...p, taskCount: 0 }])
+    api.createProject(p)
+    setActiveId(id)
+  }
+
+  function handleRenameProject(id: string, name: string) {
+    setProjects(prev => prev.map(p => p.id === id ? { ...p, name } : p))
+    const proj = projects.find(p => p.id === id)
+    if (proj) api.updateProject({ id, name, color: proj.color })
+  }
+
+  function handleDeleteProject(id: string) {
+    const remaining = projects.filter(p => p.id !== id)
+    setProjects(remaining)
+    api.deleteProject(id)
+    if (activeId === id) setActiveId(remaining[0]?.id ?? null)
+  }
+
+  // ── Task handlers (optimistic + push history) ─────────
+  function applyTasks(updated: Task[], newPositions?: Positions) {
+    const p = newPositions ?? positions
+    setTasks(updated)
+    if (newPositions) setPositions(newPositions)
+    pushHistory(updated, p)
+    return p
+  }
+
+  function handleSave(data: Omit<Task, 'id' | 'completed' | 'completedDate'>) {
+    if (!activeId) return
+    if (editingTask) {
+      const updated = tasks.map(t => t.id === editingTask.id ? { ...t, ...data } : t)
+      applyTasks(updated)
+      api.updateTask(updated.find(t => t.id === editingTask.id)!)
+    } else {
+      const id = genId()
+      const newTask: Task = { id, completed: false, ...data }
+      const updated = [...tasks, newTask]
+      const xs = Object.values(positions).map(p => p.x)
+      const x = xs.length ? Math.max(...xs) + 320 : 60
+      const newPositions = { ...positions, [id]: { x, y: 60 } }
+      applyTasks(updated, newPositions)
+      api.createProjectTask(activeId, newTask)
+      api.updatePosition(id, x, 60)
+      setProjects(prev => prev.map(p => p.id === activeId ? { ...p, taskCount: p.taskCount + 1 } : p))
+    }
+    closeModal()
+  }
+
+  function handleDelete(id: string) {
+    if (!confirm('Delete this task?')) return
+    const affected: Task[] = []
+    const updated = tasks
+      .filter(t => t.id !== id)
+      .map(t => {
+        if (!t.dependsOn.includes(id)) return t
+        const next = { ...t, dependsOn: t.dependsOn.filter(d => d !== id) }
+        affected.push(next); return next
+      })
+    const newPositions = { ...positions }
+    delete newPositions[id]
+    applyTasks(updated, newPositions)
+    affected.forEach(t => api.updateTask(t))
+    api.deleteTask(id)
+    setProjects(prev => prev.map(p => p.id === activeId ? { ...p, taskCount: Math.max(0, p.taskCount - 1) } : p))
+  }
+
+  function handleToggle(id: string) {
+    const updated = tasks.map(t =>
+      t.id === id ? { ...t, completed: !t.completed, completedDate: !t.completed ? today() : undefined } : t
+    )
+    applyTasks(updated)
+    api.updateTask(updated.find(t => t.id === id)!)
+  }
+
+  function handleTaskMove(id: string, x: number, y: number) {
+    const newPositions = { ...positions, [id]: { x, y } }
+    setPositions(newPositions)
+    pushHistory(tasks, newPositions)
+    api.updatePosition(id, x, y)
+  }
+
+  function handleConnect(fromId: string, toId: string) {
+    if (tasks.find(t => t.id === toId)?.dependsOn.includes(fromId)) return
+    const updated = tasks.map(t => t.id === toId ? { ...t, dependsOn: [...t.dependsOn, fromId] } : t)
+    applyTasks(updated)
+    api.updateTask(updated.find(t => t.id === toId)!)
+  }
+
+  function handleDisconnect(fromId: string, toId: string) {
+    const updated = tasks.map(t => t.id === toId ? { ...t, dependsOn: t.dependsOn.filter(d => d !== fromId) } : t)
+    applyTasks(updated)
+    api.updateTask(updated.find(t => t.id === toId)!)
+  }
+
+  function handleAutoArrange() {
+    const next = autoArrange(tasks)
+    setPositions(next)
+    pushHistory(tasks, next)
+    api.updateAllPositions(next)
+  }
+
+  // ── Export / Import ────────────────────────────────────
+  function handleExport() {
+    api.exportAll().then(payload => {
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `atomic-records-${new Date().toISOString().slice(0, 10)}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    })
+  }
+
+  const importInputRef = useRef<HTMLInputElement>(null)
+  function handleImportClick() { importInputRef.current?.click() }
+  function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = async ev => {
+      try {
+        const payload = JSON.parse(ev.target?.result as string)
+        const importProjects: ExportProject[] = payload.projects ?? []
+        if (!importProjects.length) { alert('No projects found in file.'); return }
+        await api.importAll(importProjects)
+        // Reload projects list
+        const updated = await api.getProjects()
+        setProjects(updated)
+        alert(`Imported ${importProjects.length} project(s).`)
+      } catch (err) {
+        alert('Import failed: ' + String(err))
+      }
+    }
+    reader.readAsText(file)
+    e.target.value = '' // reset so same file can be re-imported
+  }
+
+  function closeModal() { setShowModal(false); setEditingTask(null) }
+
+  const activeProject = projects.find(p => p.id === activeId)
+
+  if (authChecking) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-yellow-300">
+        <div className="bg-white border-4 border-black px-8 py-6 text-center" style={{ boxShadow: '8px 8px 0 #000' }}>
+          <p className="font-black uppercase tracking-widest text-xl animate-pulse">◈ LOADING…</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!user) {
+    return <LoginScreen needsSetup={needsSetup} onAuth={u => { setUser(u); setNeedsSetup(false) }} />
+  }
+
+  if (loadingProjects) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-yellow-300">
+        <div className="bg-white border-4 border-black px-8 py-6 text-center" style={{ boxShadow: '8px 8px 0 #000' }}>
+          <p className="font-black uppercase tracking-widest text-xl animate-pulse">◈ LOADING…</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="h-screen flex overflow-hidden">
+      <Sidebar
+        projects={projects}
+        activeId={activeId}
+        onSelect={setActiveId}
+        onCreate={handleCreateProject}
+        onRename={handleRenameProject}
+        onDelete={handleDeleteProject}
+      />
+
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+        <header className="shrink-0 border-b-4 border-black z-40"
+          style={{ background: activeProject ? activeProject.color : '#FFE500' }}>
+          <div className="px-4 py-3 flex items-center gap-3 flex-wrap">
+            <div className="mr-1">
+              <h1 className="text-lg font-black uppercase tracking-widest leading-none">
+                {activeProject ? activeProject.name : 'SELECT A PROJECT'}
+              </h1>
+              <p className="text-xs font-mono opacity-50">// task dependency graph</p>
+            </div>
+
+            {activeProject && <StatsBar tasks={tasks} />}
+
+            <div className="ml-auto flex items-center gap-2 flex-wrap">
+              {/* User / Logout */}
+              <span className="text-xs font-mono opacity-50 hidden md:block">{user.username}</span>
+              <button onClick={handleLogout}
+                className="bg-white font-black uppercase tracking-widest px-3 py-2 border-4 border-black hover:bg-black hover:text-white transition-colors text-xs"
+                style={{ boxShadow: '3px 3px 0 #000' }} title="Sign out">
+                ⎋ LOGOUT
+              </button>
+
+              {/* Export / Import */}
+              <button onClick={handleExport}
+                className="bg-white font-black uppercase tracking-widest px-3 py-2 border-4 border-black hover:bg-black hover:text-white transition-colors text-xs"
+                style={{ boxShadow: '3px 3px 0 #000' }} title="Export all data to JSON">
+                ↓ EXPORT
+              </button>
+              <button onClick={handleImportClick}
+                className="bg-white font-black uppercase tracking-widest px-3 py-2 border-4 border-black hover:bg-black hover:text-white transition-colors text-xs"
+                style={{ boxShadow: '3px 3px 0 #000' }} title="Import from JSON (adds/overwrites, never deletes)">
+                ↑ IMPORT
+              </button>
+              <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={handleImportFile} />
+
+              {activeProject && (
+                <>
+                  <button onClick={handleAutoArrange}
+                    className="bg-white font-black uppercase tracking-widest px-3 py-2 border-4 border-black hover:bg-black hover:text-white transition-colors text-sm"
+                    style={{ boxShadow: '4px 4px 0 #000' }}>
+                    ⊞ ARRANGE
+                  </button>
+                  <button onClick={() => { setEditingTask(null); setShowModal(true) }}
+                    className="bg-black text-white font-black uppercase tracking-widest px-4 py-2 border-4 border-black hover:bg-white hover:text-black transition-colors text-sm"
+                    style={{ boxShadow: '4px 4px 0 #000' }}>
+                    + ADD TASK
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {activeProject && (
+            <div className="flex gap-5 px-4 pb-2 items-center flex-wrap">
+              {[
+                { color: 'bg-blue-400', label: 'PENDING' },
+                { color: 'bg-green-400', label: 'COMPLETED' },
+                { color: 'bg-red-500', label: 'OVERDUE' },
+              ].map(l => (
+                <div key={l.label} className="flex items-center gap-1.5">
+                  <div className={`w-3 h-3 ${l.color} border-2 border-black`} />
+                  <span className="text-xs font-black uppercase tracking-wide opacity-60">{l.label}</span>
+                </div>
+              ))}
+              <span className="text-xs font-mono opacity-40 ml-2 hidden md:block">
+                drag card · drag → to connect · right-click arrow · scroll to zoom · Ctrl+Z/Y undo/redo
+              </span>
+            </div>
+          )}
+        </header>
+
+        {!activeProject && (
+          <div className="flex-1 flex items-center justify-center" style={{ background: '#f5f0e8' }}>
+            <div className="bg-white border-4 border-black p-12 text-center" style={{ boxShadow: '8px 8px 0 #000' }}>
+              <div className="text-5xl mb-4 opacity-20">◈</div>
+              <p className="font-black uppercase tracking-widest text-gray-500">Create a project to get started</p>
+            </div>
+          </div>
+        )}
+
+        {activeProject && loadingBoard && (
+          <div className="flex-1 flex items-center justify-center" style={{ background: '#f5f0e8' }}>
+            <p className="font-black uppercase tracking-widest animate-pulse opacity-40">Loading…</p>
+          </div>
+        )}
+
+        {activeProject && !loadingBoard && (
+          <TaskGraph
+            key={activeId}
+            tasks={tasks} positions={positions}
+            onTaskMove={handleTaskMove}
+            onConnect={handleConnect}
+            onDisconnect={handleDisconnect}
+            onAutoArrange={handleAutoArrange}
+            onUndo={handleUndo}
+            onRedo={handleRedo}
+            onEdit={t => { setEditingTask(t); setShowModal(true) }}
+            onDelete={handleDelete}
+            onToggle={handleToggle}
+          />
+        )}
+      </div>
+
+      {showModal && activeProject && (
+        <TaskModal task={editingTask} allTasks={tasks} onSave={handleSave} onClose={closeModal} />
+      )}
+    </div>
+  )
+}
