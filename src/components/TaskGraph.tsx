@@ -41,6 +41,7 @@ export default function TaskGraph({ tasks, positions, onTaskMove, onConnect, onD
   const [connectPreview, setConnectPreview] = useState<ConnectPreview | null>(null)
   const [hoveredCard, setHoveredCard] = useState<string | null>(null)
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null)
+  const [hoveredArrow, setHoveredArrow] = useState<string | null>(null)
 
   const panRef = useRef(pan)
   const zoomRef = useRef(zoom)
@@ -245,6 +246,9 @@ export default function TaskGraph({ tasks, positions, onTaskMove, onConnect, onD
               <marker id="arr" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
                 <polygon points="0 0,10 3.5,0 7" fill="#000" />
               </marker>
+              <marker id="arr-hover" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                <polygon points="0 0,10 3.5,0 7" fill="#d97706" />
+              </marker>
               <marker id="arr-preview" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
                 <polygon points="0 0,10 3.5,0 7" fill="#2563eb" />
               </marker>
@@ -252,18 +256,25 @@ export default function TaskGraph({ tasks, positions, onTaskMove, onConnect, onD
 
             {tasks.flatMap(task =>
               task.dependsOn.filter(depId => positions[depId]).map(depId => {
+                const key = `${depId}->${task.id}`
+                const isHovered = hoveredArrow === key
                 const from = effectivePos(depId)
                 const to = effectivePos(task.id)
-                // Use measured heights so arrows connect to the actual vertical center
                 const x1 = from.x + CARD_W + PORT_OFFSET, y1 = from.y + cardH(depId) / 2
                 const x2 = to.x, y2 = to.y + cardH(task.id) / 2
                 const mid = (x1 + x2) / 2
                 const d = `M${x1} ${y1} C${mid} ${y1},${mid} ${y2},${x2} ${y2}`
                 return (
-                  <g key={`${depId}->${task.id}`} style={{ pointerEvents: 'all' }}>
+                  <g key={key} style={{ pointerEvents: 'all' }}
+                    onMouseEnter={() => setHoveredArrow(key)}
+                    onMouseLeave={() => setHoveredArrow(null)}>
                     <path d={d} stroke="transparent" strokeWidth="14" fill="none" style={{ cursor: 'context-menu' }}
                       onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setCtxMenu({ screenX: e.clientX, screenY: e.clientY, fromId: depId, toId: task.id }) }} />
-                    <path d={d} stroke="#000" strokeWidth="3" fill="none" markerEnd="url(#arr)" />
+                    <path d={d} fill="none"
+                      stroke={isHovered ? '#d97706' : '#000'}
+                      strokeWidth={isHovered ? 4 : 3}
+                      markerEnd={isHovered ? 'url(#arr-hover)' : 'url(#arr)'}
+                      style={{ transition: 'stroke 0.1s, stroke-width 0.1s' }} />
                   </g>
                 )
               })
