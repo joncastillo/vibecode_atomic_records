@@ -1,11 +1,12 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
-import { Task, Project, today } from './types'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { Task, Project, today, OVERALL_PROJECT_ID, OVERALL_PROJECT } from './types'
 import { Positions, autoArrange } from './utils'
 import { api, checkAuth, setToken, AuthUser, ExportProject } from './api'
 import TaskGraph from './components/TaskGraph'
+import OverallGraph from './components/OverallGraph'
 import TaskModal from './components/TaskModal'
 import StatsBar from './components/StatsBar'
-import Sidebar from './components/Sidebar'
+import Sidebar, { ExpTask } from './components/Sidebar'
 import LoginScreen from './components/LoginScreen'
 
 function genId(): string { return Date.now().toString(36) + Math.random().toString(36).slice(2) }
@@ -27,6 +28,9 @@ export default function App() {
   const [showModal, setShowModal] = useState(false)
   const [editingTask, setEditingTask] = useState<Task | null>(null)
 
+  // Cross-project task cache for Overall view and expiring list
+  const [allTasksMap, setAllTasksMap] = useState<Record<string, Task[]>>({})
+
   // ── History (refs — no re-renders) ────────────────────
   const historyRef = useRef<BoardState[]>([])
   const historyIdxRef = useRef(-1)
@@ -45,7 +49,10 @@ export default function App() {
     const s = clone(historyRef.current[historyIdxRef.current])
     setTasks(s.tasks); setPositions(s.positions)
     const pid = activeIdRef.current
-    if (pid) api.replaceBoardState(pid, s.tasks, s.positions)
+    if (pid && pid !== OVERALL_PROJECT_ID) {
+      api.replaceBoardState(pid, s.tasks, s.positions)
+      setAllTasksMap(prev => ({ ...prev, [pid]: s.tasks }))
+    }
   }, [])
 
   const handleRedo = useCallback(() => {
@@ -54,10 +61,12 @@ export default function App() {
     const s = clone(historyRef.current[historyIdxRef.current])
     setTasks(s.tasks); setPositions(s.positions)
     const pid = activeIdRef.current
-    if (pid) api.replaceBoardState(pid, s.tasks, s.positions)
+    if (pid && pid !== OVERALL_PROJECT_ID) {
+      api.replaceBoardState(pid, s.tasks, s.positions)
+      setAllTasksMap(prev => ({ ...prev, [pid]: s.tasks }))
+    }
   }, [])
 
-  // Global Ctrl+Z / Ctrl+Y
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const el = document.activeElement
@@ -86,24 +95,42 @@ export default function App() {
     setActiveId(null)
     setTasks([])
     setPositions({})
+    setAllTasksMap({})
   }
 
-  // ── Load projects ──────────────────────────────────────
+  // ── Load projects + all tasks ──────────────────────────
   useEffect(() => {
     if (!user) return
     setLoadingProjects(true)
     api.getProjects()
-      .then(ps => { setProjects(ps); if (ps.length > 0) setActiveId(ps[0].id) })
+      .then(async ps => {
+        setProjects(ps)
+        if (ps.length > 0) {
+          const entries = await Promise.all(
+            ps.map(p => api.getProjectTasks(p.id)
+              .then(t => [p.id, t] as const)
+              .catch(() => [p.id, []] as const))
+          )
+          setAllTasksMap(Object.fromEntries(entries))
+          setActiveId(OVERALL_PROJECT_ID)
+        }
+      })
       .finally(() => setLoadingProjects(false))
   }, [user])
 
   // ── Load board when project switches ──────────────────
   useEffect(() => {
-    if (!activeId) { setTasks([]); setPositions({}); return }
+    if (!activeId || activeId === OVERALL_PROJECT_ID) {
+      setTasks([]); setPositions({}); return
+    }
+    setTasks([])
+    setPositions({})
     setLoadingBoard(true)
+    const loadingId = activeId
     Promise.all([api.getProjectTasks(activeId), api.getProjectPositions(activeId)])
       .then(([t, p]) => {
         setTasks(t); setPositions(p)
+        setAllTasksMap(prev => ({ ...prev, [loadingId]: t }))
         historyRef.current = [clone({ tasks: t, positions: p })]
         historyIdxRef.current = 0
       })
@@ -115,6 +142,7 @@ export default function App() {
     const id = genId()
     const p: Omit<Project, 'taskCount'> = { id, name, color, createdAt: new Date().toISOString() }
     setProjects(prev => [...prev, { ...p, taskCount: 0 }])
+    setAllTasksMap(prev => ({ ...prev, [id]: [] }))
     api.createProject(p)
     setActiveId(id)
   }
@@ -129,20 +157,24 @@ export default function App() {
     const remaining = projects.filter(p => p.id !== id)
     setProjects(remaining)
     api.deleteProject(id)
-    if (activeId === id) setActiveId(remaining[0]?.id ?? null)
+    setAllTasksMap(prev => { const n = { ...prev }; delete n[id]; return n })
+    if (activeId === id) setActiveId(remaining.length > 0 ? OVERALL_PROJECT_ID : null)
   }
 
   // ── Task handlers (optimistic + push history) ─────────
   function applyTasks(updated: Task[], newPositions?: Positions) {
     const p = newPositions ?? positions
     setTasks(updated)
+    if (activeId && activeId !== OVERALL_PROJECT_ID) {
+      setAllTasksMap(prev => ({ ...prev, [activeId]: updated }))
+    }
     if (newPositions) setPositions(newPositions)
     pushHistory(updated, p)
     return p
   }
 
   function handleSave(data: Omit<Task, 'id' | 'completed' | 'completedDate'>) {
-    if (!activeId) return
+    if (!activeId || activeId === OVERALL_PROJECT_ID) return
     if (editingTask) {
       const updated = tasks.map(t => t.id === editingTask.id ? { ...t, ...data } : t)
       applyTasks(updated)
@@ -240,21 +272,55 @@ export default function App() {
         const importProjects: ExportProject[] = payload.projects ?? []
         if (!importProjects.length) { alert('No projects found in file.'); return }
         await api.importAll(importProjects)
-        // Reload projects list
         const updated = await api.getProjects()
         setProjects(updated)
+        const entries = await Promise.all(
+          updated.map(p => api.getProjectTasks(p.id).then(t => [p.id, t] as const).catch(() => [p.id, []] as const))
+        )
+        setAllTasksMap(Object.fromEntries(entries))
         alert(`Imported ${importProjects.length} project(s).`)
       } catch (err) {
         alert('Import failed: ' + String(err))
       }
     }
     reader.readAsText(file)
-    e.target.value = '' // reset so same file can be re-imported
+    e.target.value = ''
   }
 
   function closeModal() { setShowModal(false); setEditingTask(null) }
 
-  const activeProject = projects.find(p => p.id === activeId)
+  // ── Derived data ───────────────────────────────────────
+  const totalTaskCount = useMemo(
+    () => Object.values(allTasksMap).reduce((sum, t) => sum + t.length, 0),
+    [allTasksMap]
+  )
+
+  const overallProject: Project = { ...OVERALL_PROJECT, taskCount: totalTaskCount }
+  const displayProjects = [overallProject, ...projects]
+  const activeProject = displayProjects.find(p => p.id === activeId)
+  const isOverall = activeId === OVERALL_PROJECT_ID
+
+  const allTasksList = useMemo(
+    () => Object.values(allTasksMap).flat(),
+    [allTasksMap]
+  )
+
+  const expiringTasks = useMemo((): ExpTask[] => {
+    const todayStr = today()
+    const limit = new Date()
+    limit.setDate(limit.getDate() + 3)
+    const limitStr = limit.toISOString().split('T')[0]
+    const result: ExpTask[] = []
+    projects.forEach(p => {
+      ;(allTasksMap[p.id] ?? []).forEach(t => {
+        if (!t.completed && t.dueDate >= todayStr && t.dueDate <= limitStr) {
+          result.push({ task: t, projectId: p.id, projectName: p.name, projectColor: p.color })
+        }
+      })
+    })
+    result.sort((a, b) => a.task.dueDate.localeCompare(b.task.dueDate))
+    return result
+  }, [allTasksMap, projects])
 
   if (authChecking) {
     return (
@@ -283,12 +349,13 @@ export default function App() {
   return (
     <div className="h-screen flex overflow-hidden">
       <Sidebar
-        projects={projects}
+        projects={displayProjects}
         activeId={activeId}
         onSelect={setActiveId}
         onCreate={handleCreateProject}
         onRename={handleRenameProject}
         onDelete={handleDeleteProject}
+        expiringTasks={expiringTasks}
       />
 
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
@@ -299,21 +366,20 @@ export default function App() {
               <h1 className="text-lg font-black uppercase tracking-widest leading-none">
                 {activeProject ? activeProject.name : 'SELECT A PROJECT'}
               </h1>
-              <p className="text-xs font-mono opacity-50">// task dependency graph</p>
+              <p className="text-xs font-mono opacity-50">
+                {isOverall ? '// all projects consolidated' : '// task dependency graph'}
+              </p>
             </div>
 
-            {activeProject && <StatsBar tasks={tasks} />}
+            {activeProject && <StatsBar tasks={isOverall ? allTasksList : tasks} />}
 
             <div className="ml-auto flex items-center gap-2 flex-wrap">
-              {/* User / Logout */}
               <span className="text-xs font-mono opacity-50 hidden md:block">{user.username}</span>
               <button onClick={handleLogout}
                 className="bg-white font-black uppercase tracking-widest px-3 py-2 border-4 border-black hover:bg-black hover:text-white transition-colors text-xs"
                 style={{ boxShadow: '3px 3px 0 #000' }} title="Sign out">
                 ⎋ LOGOUT
               </button>
-
-              {/* Export / Import */}
               <button onClick={handleExport}
                 className="bg-white font-black uppercase tracking-widest px-3 py-2 border-4 border-black hover:bg-black hover:text-white transition-colors text-xs"
                 style={{ boxShadow: '3px 3px 0 #000' }} title="Export all data to JSON">
@@ -321,12 +387,12 @@ export default function App() {
               </button>
               <button onClick={handleImportClick}
                 className="bg-white font-black uppercase tracking-widest px-3 py-2 border-4 border-black hover:bg-black hover:text-white transition-colors text-xs"
-                style={{ boxShadow: '3px 3px 0 #000' }} title="Import from JSON (adds/overwrites, never deletes)">
+                style={{ boxShadow: '3px 3px 0 #000' }} title="Import from JSON">
                 ↑ IMPORT
               </button>
               <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={handleImportFile} />
 
-              {activeProject && (
+              {activeProject && !isOverall && (
                 <>
                   <button onClick={handleAutoArrange}
                     className="bg-white font-black uppercase tracking-widest px-3 py-2 border-4 border-black hover:bg-black hover:text-white transition-colors text-sm"
@@ -356,7 +422,9 @@ export default function App() {
                 </div>
               ))}
               <span className="text-xs font-mono opacity-40 ml-2 hidden md:block">
-                drag card · drag → to connect · right-click arrow · scroll to zoom · Ctrl+Z/Y undo/redo
+                {isOverall
+                  ? 'read-only · scroll to zoom · drag to pan'
+                  : 'drag card · drag → to connect · right-click arrow · scroll to zoom · Ctrl+Z/Y undo/redo'}
               </span>
             </div>
           )}
@@ -371,13 +439,21 @@ export default function App() {
           </div>
         )}
 
-        {activeProject && loadingBoard && (
+        {activeProject && !isOverall && loadingBoard && (
           <div className="flex-1 flex items-center justify-center" style={{ background: '#f5f0e8' }}>
             <p className="font-black uppercase tracking-widest animate-pulse opacity-40">Loading…</p>
           </div>
         )}
 
-        {activeProject && !loadingBoard && (
+        {activeProject && isOverall && (
+          <OverallGraph
+            key="overall"
+            projects={projects}
+            allTasksMap={allTasksMap}
+          />
+        )}
+
+        {activeProject && !isOverall && !loadingBoard && (
           <TaskGraph
             key={activeId}
             tasks={tasks} positions={positions}
@@ -394,7 +470,7 @@ export default function App() {
         )}
       </div>
 
-      {showModal && activeProject && (
+      {showModal && activeProject && !isOverall && (
         <TaskModal task={editingTask} allTasks={tasks} onSave={handleSave} onClose={closeModal} />
       )}
     </div>

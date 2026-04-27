@@ -1,5 +1,12 @@
 import { useState, useRef, useEffect } from 'react'
-import { Project, PROJECT_PALETTE } from '../types'
+import { Project, Task, PROJECT_PALETTE, OVERALL_PROJECT_ID, formatDate } from '../types'
+
+export interface ExpTask {
+  task: Task
+  projectId: string
+  projectName: string
+  projectColor: string
+}
 
 interface Props {
   projects: Project[]
@@ -8,9 +15,10 @@ interface Props {
   onCreate: (name: string, color: string) => void
   onRename: (id: string, name: string) => void
   onDelete: (id: string) => void
+  expiringTasks: ExpTask[]
 }
 
-export default function Sidebar({ projects, activeId, onSelect, onCreate, onRename, onDelete }: Props) {
+export default function Sidebar({ projects, activeId, onSelect, onCreate, onRename, onDelete, expiringTasks }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [creating, setCreating] = useState(false)
@@ -33,7 +41,7 @@ export default function Sidebar({ projects, activeId, onSelect, onCreate, onRena
   }
 
   function startCreate() {
-    const used = projects.length
+    const used = projects.filter(p => p.id !== OVERALL_PROJECT_ID).length
     setNewColor(PROJECT_PALETTE[used % PROJECT_PALETTE.length])
     setNewName('')
     setCreating(true)
@@ -57,14 +65,15 @@ export default function Sidebar({ projects, activeId, onSelect, onCreate, onRena
       style={{ width: 220, background: '#111', minHeight: 0 }}
     >
       {/* Brand */}
-      <div className="px-4 py-4 border-b-4 border-black" style={{ background: '#000' }}>
+      <div className="px-4 py-4 border-b-4 border-black shrink-0" style={{ background: '#000' }}>
         <p className="text-yellow-300 font-black text-base uppercase tracking-widest leading-tight">◈ ATOMIC</p>
         <p className="text-yellow-300 font-black text-base uppercase tracking-widest leading-tight">RECORDS</p>
         <p className="text-gray-500 font-mono text-xs mt-1">// task graph</p>
       </div>
 
-      {/* Project list */}
+      {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto min-h-0">
+        {/* Project list */}
         <div className="px-3 pt-3 pb-1">
           <p className="text-gray-500 font-black text-xs uppercase tracking-widest">Projects</p>
         </div>
@@ -72,6 +81,7 @@ export default function Sidebar({ projects, activeId, onSelect, onCreate, onRena
         {projects.map(p => {
           const isActive = p.id === activeId
           const isEditing = editingId === p.id
+          const isOverall = p.id === OVERALL_PROJECT_ID
 
           return (
             <div
@@ -102,18 +112,25 @@ export default function Sidebar({ projects, activeId, onSelect, onCreate, onRena
                   <>
                     <span
                       className={`flex-1 font-black text-xs uppercase tracking-wide truncate ${isActive ? 'text-black' : 'text-gray-300 group-hover:text-white'}`}
-                      onDoubleClick={e => { e.stopPropagation(); startEdit(p) }}
+                      onDoubleClick={e => {
+                        if (isOverall) return
+                        e.stopPropagation()
+                        startEdit(p)
+                      }}
                     >
+                      {isOverall && <span className="opacity-50 mr-1">◈</span>}
                       {p.name}
                     </span>
                     <span className={`text-xs font-mono shrink-0 ${isActive ? 'text-black opacity-60' : 'text-gray-600 group-hover:text-gray-400'}`}>
                       {p.taskCount}
                     </span>
-                    <button
-                      onClick={e => handleDeleteClick(e, p)}
-                      className={`shrink-0 w-4 h-4 font-black text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity ${isActive ? 'text-black hover:text-red-700' : 'text-gray-500 hover:text-red-400'}`}
-                      title="Delete project"
-                    >×</button>
+                    {!isOverall && (
+                      <button
+                        onClick={e => handleDeleteClick(e, p)}
+                        className={`shrink-0 w-4 h-4 font-black text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity ${isActive ? 'text-black hover:text-red-700' : 'text-gray-500 hover:text-red-400'}`}
+                        title="Delete project"
+                      >×</button>
+                    )}
                   </>
                 )}
               </div>
@@ -156,6 +173,36 @@ export default function Sidebar({ projects, activeId, onSelect, onCreate, onRena
                 className="text-yellow-300 font-black text-xs hover:text-white"
               >✓</button>
             </div>
+          </div>
+        )}
+
+        {/* Expiring Soon section */}
+        {expiringTasks.length > 0 && (
+          <div className="border-t-4 border-black mt-2">
+            <div className="px-3 pt-3 pb-1">
+              <p className="text-red-400 font-black text-xs uppercase tracking-widest">⚠ Expiring Soon</p>
+            </div>
+            {expiringTasks.map(({ task, projectId, projectName, projectColor }) => (
+              <div
+                key={task.id}
+                className="mx-2 mb-1.5 px-2 py-1.5 cursor-pointer hover:bg-white hover:bg-opacity-10 transition-colors"
+                style={{ borderLeft: `3px solid ${projectColor}`, background: 'rgba(255,255,255,0.04)' }}
+                onClick={() => onSelect(projectId)}
+                title={`Go to ${projectName}`}
+              >
+                <p className={`text-xs font-black truncate ${task.completed ? 'line-through opacity-40 text-gray-400' : 'text-white'}`}>
+                  {task.title}
+                </p>
+                <div className="flex items-center gap-1 mt-0.5">
+                  <span className="text-xs font-mono truncate" style={{ color: projectColor, opacity: 0.7, maxWidth: 90 }}>
+                    {projectName}
+                  </span>
+                  <span className="text-xs font-black font-mono ml-auto shrink-0 text-red-400">
+                    {formatDate(task.dueDate)}
+                  </span>
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </div>

@@ -265,11 +265,11 @@ export default function TaskGraph({ tasks, positions, onTaskMove, onConnect, onD
                 const mid = (x1 + x2) / 2
                 const d = `M${x1} ${y1} C${mid} ${y1},${mid} ${y2},${x2} ${y2}`
                 return (
-                  <g key={key} style={{ pointerEvents: 'all' }}
+                  <g key={key} style={{ pointerEvents: 'all', cursor: 'context-menu' }}
                     onMouseEnter={() => setHoveredArrow(key)}
-                    onMouseLeave={() => setHoveredArrow(null)}>
-                    <path d={d} stroke="transparent" strokeWidth="14" fill="none" style={{ cursor: 'context-menu' }}
-                      onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setCtxMenu({ screenX: e.clientX, screenY: e.clientY, fromId: depId, toId: task.id }) }} />
+                    onMouseLeave={() => setHoveredArrow(null)}
+                    onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setCtxMenu({ screenX: e.clientX, screenY: e.clientY, fromId: depId, toId: task.id }) }}>
+                    <path d={d} stroke="transparent" strokeWidth="14" fill="none" />
                     <path d={d} fill="none"
                       stroke={isHovered ? '#d97706' : '#000'}
                       strokeWidth={isHovered ? 4 : 3}

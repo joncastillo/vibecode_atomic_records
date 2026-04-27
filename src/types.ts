@@ -41,3 +41,12 @@ export const PROJECT_PALETTE = [
   '#FFE500', '#FF3B3B', '#3B9EFF', '#38E54D',
   '#FF8C00', '#9B5DE5', '#FF6B9D', '#00CED1',
 ]
+
+export const OVERALL_PROJECT_ID = '__overall__'
+export const OVERALL_PROJECT: Project = {
+  id: OVERALL_PROJECT_ID,
+  name: 'OVERALL',
+  color: '#E2E8F0',
+  createdAt: '',
+  taskCount: 0,
+}

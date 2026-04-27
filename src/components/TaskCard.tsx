@@ -9,6 +9,7 @@ interface Props {
   onEdit: (task: Task) => void
   onDelete: (id: string) => void
   onToggle: (id: string) => void
+  readOnly?: boolean
 }
 
 const STATUS: Record<TaskStatus, { card: string; badge: string; badgeText: string }> = {
@@ -29,7 +30,7 @@ const STATUS: Record<TaskStatus, { card: string; badge: string; badgeText: strin
   },
 }
 
-export default function TaskCard({ task, index, isConnectTarget, isConnectSource, onEdit, onDelete, onToggle }: Props) {
+export default function TaskCard({ task, index, isConnectTarget, isConnectSource, onEdit, onDelete, onToggle, readOnly }: Props) {
   const status = getTaskStatus(task)
   const s = STATUS[status]
 
@@ -101,40 +102,44 @@ export default function TaskCard({ task, index, isConnectTarget, isConnectSource
       </div>
 
       {/* Footer */}
-      <div className="flex border-t-4 border-inherit shrink-0">
-        <button
-          onMouseDown={e => e.stopPropagation()}
-          onClick={() => onEdit(task)}
-          className="flex-1 py-1.5 text-xs font-black uppercase tracking-widest hover:bg-yellow-300 transition-colors border-r-2 border-inherit"
-        >
-          EDIT
-        </button>
-        <button
-          onMouseDown={e => e.stopPropagation()}
-          onClick={() => onDelete(task.id)}
-          className="flex-1 py-1.5 text-xs font-black uppercase tracking-widest hover:bg-red-500 hover:text-white transition-colors"
-        >
-          DEL
-        </button>
-      </div>
+      {!readOnly && (
+        <div className="flex border-t-4 border-inherit shrink-0">
+          <button
+            onMouseDown={e => e.stopPropagation()}
+            onClick={() => onEdit(task)}
+            className="flex-1 py-1.5 text-xs font-black uppercase tracking-widest hover:bg-yellow-300 transition-colors border-r-2 border-inherit"
+          >
+            EDIT
+          </button>
+          <button
+            onMouseDown={e => e.stopPropagation()}
+            onClick={() => onDelete(task.id)}
+            className="flex-1 py-1.5 text-xs font-black uppercase tracking-widest hover:bg-red-500 hover:text-white transition-colors"
+          >
+            DEL
+          </button>
+        </div>
+      )}
 
       {/* Connection port — right edge */}
-      <div
-        data-port={task.id}
-        className="absolute flex items-center justify-center font-black text-xs border-black bg-yellow-300 hover:bg-black hover:text-yellow-300 transition-colors"
-        style={{
-          width: 26, height: 26,
-          right: -15, top: '50%',
-          transform: 'translateY(-50%)',
-          cursor: 'crosshair',
-          zIndex: 10,
-          borderWidth: 3, borderStyle: 'solid',
-          boxShadow: '3px 3px 0 #000',
-        }}
-        title="Drag to connect"
-      >
-        →
-      </div>
+      {!readOnly && (
+        <div
+          data-port={task.id}
+          className="absolute flex items-center justify-center font-black text-xs border-black bg-yellow-300 hover:bg-black hover:text-yellow-300 transition-colors"
+          style={{
+            width: 26, height: 26,
+            right: -15, top: '50%',
+            transform: 'translateY(-50%)',
+            cursor: 'crosshair',
+            zIndex: 10,
+            borderWidth: 3, borderStyle: 'solid',
+            boxShadow: '3px 3px 0 #000',
+          }}
+          title="Drag to connect"
+        >
+          →
+        </div>
+      )}
     </div>
   )
 }
